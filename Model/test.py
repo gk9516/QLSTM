@@ -29,14 +29,14 @@ def clean_data(data):
 def encode_data(data):
     label_encoder_app = LabelEncoder()
     encoded_data = label_encoder_app.fit_transform(data.iloc[:, 0])
-    encoded_data = pd.DataFrame(data=encoded_data)
-    return [encoded_data, label_encoder_app]
+    encoded_data = pd.DataFrame(data=encoded_data)  # Convert to DataFrame
+    return encoded_data, label_encoder_app
 
 # Split the data into training and testing sets
 def split_into_train_test_set(encoded_data):
-    train_set = encoded_data.iloc[:1901, 0].values
-    test_set = encoded_data.iloc[1901:, 0].values
-    return [train_set, test_set]
+    train_set = encoded_data.iloc[:1901]
+    test_set = encoded_data.iloc[1901:]
+    return train_set, test_set
 
 data = clean_data(data)
 encoded_data, label_encoder_app = encode_data(data)
@@ -44,23 +44,22 @@ train_set, test_set = split_into_train_test_set(encoded_data)
 
 # Scale the data
 scaler = MinMaxScaler(feature_range=(0, 1))
-training_set_scaled = scaler.fit_transform(train_set.reshape(-1, 1))
+training_set_scaled = scaler.fit_transform(train_set.values.reshape(-1, 1))
 
 # Prepare training data
 X_train = []
 y_train = []
 
-for i in range(10, 1901):
+for i in range(10, len(training_set_scaled)):
     X_train.append(training_set_scaled[i-10:i, 0])
-    y_train.append(train_set[i])
+    y_train.append(train_set.values[i])
 
 X_train = np.array(X_train)
 X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
 label_encoder_y = LabelEncoder()
 y_train = label_encoder_y.fit_transform(y_train)
-y_train = np.array(y_train)
-y_train = to_categorical(y_train, num_classes=36)
+y_train = to_categorical(y_train, num_classes=len(label_encoder_app.classes_))
 
 # Define quantum device and circuit
 n_qubits = 4
@@ -80,6 +79,8 @@ class qLSTMCell:
         self.weights = pnp.random.random(size=(input_dim + hidden_dim, 3, hidden_dim))
 
     def forward(self, x_t, h_prev):
+        x_t = x_t.flatten()  # Ensure x_t is a 1D array
+        h_prev = h_prev.flatten()  # Ensure h_prev is a 1D array
         z_t = np.concatenate([x_t, h_prev])
         h_t = np.tanh(np.dot(z_t, self.weights[:, 0, :]))
         c_t = np.tanh(np.dot(z_t, self.weights[:, 1, :]))
@@ -101,13 +102,16 @@ class qLSTMModel:
         return output
 
     def predict(self, x):
-        output = self.forward(x)
-        return np.argmax(output, axis=1)
+        y_pred = []
+        for sample in x:
+            output = self.forward(sample)
+            y_pred.append(np.argmax(output, axis=0))
+        return np.array(y_pred)
 
 # Instantiate and train the model
 input_dim = X_train.shape[2]
 hidden_dim = 4  # Number of qubits
-output_dim = 36
+output_dim = len(label_encoder_app.classes_)
 
 model = qLSTMModel(input_dim, hidden_dim, output_dim)
 
@@ -130,13 +134,13 @@ for epoch in range(epochs):
         print(f"Epoch {epoch}: Loss {train_loss}")
 
 # Testing
-total_dataset = encoded_data.iloc[:, 0]
-inputs = total_dataset[len(total_dataset) - len(test_set) - 10:].values
-inputs = inputs.reshape(-1, 1)
+# Testing Phase
+total_dataset = encoded_data.values  # Use .values to convert DataFrame to ndarray
+inputs = total_dataset[len(total_dataset) - len(test_set) - 10:].reshape(-1, 1)
 inputs = scaler.transform(inputs)
 X_test = []
 
-for i in range(10, 397):
+for i in range(10, len(inputs)):
     X_test.append(inputs[i-10:i, 0])
 
 X_test = np.array(X_test)
@@ -144,29 +148,24 @@ X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
 
 predicted_app = model.predict(X_test)
 
-# Confusion matrix
-cm = np.zeros(shape=(2, 2))
-for i in range(387):
-    if test_set[i] == predicted_app[i]:
-        cm[1, 1] += 1
-    else:
-        cm[1, 0] += 1
+# Clip predicted labels to the valid range
+predicted_app = np.clip(predicted_app, 0, len(label_encoder_app.classes_) - 1)
 
 # Final predictions
 idx = (-predicted_app).argsort()
 idx = pd.DataFrame(idx)
-prediction = label_encoder_app.inverse_transform(idx.iloc[:, 0])
-prediction = pd.DataFrame(data=prediction)
-actual_app_used = label_encoder_app.inverse_transform(test_set)
-actual_app_used = pd.DataFrame(data=actual_app_used)
 
-for i in range(1, 4):
-    idx3 = label_encoder_app.inverse_transform(idx.iloc[:, i:i+1])
-    idx3 = pd.DataFrame(data=idx3)
-    prediction = pd.concat([prediction, idx3], ignore_index=True, axis=1)
+# Clip indices to ensure they are within the range of seen labels
+idx_clipped = np.clip(idx, 0, len(label_encoder_app.classes_) - 1)
+prediction = label_encoder_app.inverse_transform(idx_clipped.values.flatten())
+
+# Reshape prediction back to DataFrame format
+prediction = pd.DataFrame(data=prediction.reshape(-1, idx.shape[1]), columns=[f'Prediction{i+1}' for i in range(idx.shape[1])])
+
+actual_app_used = label_encoder_app.inverse_transform(test_set.values)
+actual_app_used = pd.DataFrame(data=actual_app_used, columns=['Actual App Used'])
 
 final_outcome = pd.concat([prediction, actual_app_used], axis=1)
-final_outcome.columns = ['Prediction1', 'Prediction2', 'Prediction3', 'Prediction4', 'Actual App Used']
 
 print('***********************************FINAL PREDICTION*********************************')
 print(final_outcome)
