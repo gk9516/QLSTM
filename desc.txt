@@ -1,0 +1,6 @@
+# Quantum LSTM Model for Predicting Next Mobile Apps Usage
+
+## Overview
+
+
+This project aims to develop a predictive model using a Long Short-Term Memory (LSTM) neural network to forecast the next mobile applications that users are likely to engage with based on their historical app usage patterns. The LSTM model is trained on a dataset comprising timestamps and corresponding app usage data, processed using normalization techniques to prepare sequential input sequences. The model architecture includes LSTM layers for sequence learning and a dense output layer for prediction. During training, the model learns to capture temporal dependencies in app usage behaviors, optimizing with the Adam optimizer to minimize mean squared error. Upon training completion, the model is capable of making real-time predictions about the next app a user might use given their current app usage profile. This project combines fundamental principles of machine learning with practical application in mobile app usage prediction, aiming to enhance user experience by anticipating app preferences effectively.
