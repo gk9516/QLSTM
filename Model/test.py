@@ -6,6 +6,7 @@ from pennylane import numpy as pnp
 from pennylane.templates import AngleEmbedding, StronglyEntanglingLayers
 from pennylane.optimize import AdamOptimizer
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
 
 # Load the dataset
@@ -13,53 +14,39 @@ data = pd.read_csv('Dataset/dataset.csv')
 
 # Clean the data
 def clean_data(data):
-    data = data[~(data == 'Screen off (locked)').any(axis=1)]
-    data = data[~(data == 'Screen on (unlocked)').any(axis=1)]
-    data = data[~(data == 'Screen off (unlocked)').any(axis=1)]
-    data = data[~(data == 'Screen on (locked)').any(axis=1)]
-    data = data[~(data == 'Screen on').any(axis=1)]
-    data = data[~(data == 'Screen off').any(axis=1)]
-    data = data[~(data == 'Device shutdown').any(axis=1)]
-    data = data[~(data == 'Device boot').any(axis=1)]
-    data = data.dropna()
-    data.index = range(len(data))
+    # Remove specific entries that are not useful for prediction
+    remove_strings = ['Screen off (locked)', 'Screen on (unlocked)', 'Screen off (unlocked)',
+                      'Screen on (locked)', 'Screen on', 'Screen off', 'Device shutdown', 'Device boot']
+    for entry in remove_strings:
+        data = data[~data.iloc[:, 0].str.contains(entry, na=False)]
+
+    data = data.dropna().reset_index(drop=True)
     return data
 
 # Encode the data
 def encode_data(data):
     label_encoder_app = LabelEncoder()
-    encoded_data = label_encoder_app.fit_transform(data.iloc[:, 0])
-    encoded_data = pd.DataFrame(data=encoded_data)  # Convert to DataFrame
-    return encoded_data, label_encoder_app
+    data['Encoded_App'] = label_encoder_app.fit_transform(data.iloc[:, 0])
+    return data, label_encoder_app
 
 # Split the data into training and testing sets
 def split_into_train_test_set(encoded_data):
-    train_set = encoded_data.iloc[:1901]
-    test_set = encoded_data.iloc[1901:]
+    train_set, test_set = train_test_split(encoded_data, test_size=0.2, shuffle=False)
     return train_set, test_set
 
-data = clean_data(data)
-encoded_data, label_encoder_app = encode_data(data)
-train_set, test_set = split_into_train_test_set(encoded_data)
-
 # Scale the data
-scaler = MinMaxScaler(feature_range=(0, 1))
-training_set_scaled = scaler.fit_transform(train_set.values.reshape(-1, 1))
+def scale_data(data):
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+    return scaled_data, scaler
 
 # Prepare training data
-X_train = []
-y_train = []
-
-for i in range(10, len(training_set_scaled)):
-    X_train.append(training_set_scaled[i-10:i, 0])
-    y_train.append(train_set.values[i])
-
-X_train = np.array(X_train)
-X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
-
-label_encoder_y = LabelEncoder()
-y_train = label_encoder_y.fit_transform(y_train)
-y_train = to_categorical(y_train, num_classes=len(label_encoder_app.classes_))
+def prepare_training_data(train_set, sequence_length):
+    X_train, y_train = [], []
+    for i in range(sequence_length, len(train_set)):
+        X_train.append(train_set[i-sequence_length:i, 0])
+        y_train.append(train_set[i, 1])
+    return np.array(X_train), np.array(y_train)
 
 # Define quantum device and circuit
 n_qubits = 4
@@ -79,8 +66,8 @@ class qLSTMCell:
         self.weights = pnp.random.random(size=(input_dim + hidden_dim, 3, hidden_dim))
 
     def forward(self, x_t, h_prev):
-        x_t = x_t.flatten()  # Ensure x_t is a 1D array
-        h_prev = h_prev.flatten()  # Ensure h_prev is a 1D array
+        x_t = x_t.flatten()
+        h_prev = h_prev.flatten()
         z_t = np.concatenate([x_t, h_prev])
         h_t = np.tanh(np.dot(z_t, self.weights[:, 0, :]))
         c_t = np.tanh(np.dot(z_t, self.weights[:, 1, :]))
@@ -109,63 +96,75 @@ class qLSTMModel:
         return np.array(y_pred)
 
 # Instantiate and train the model
-input_dim = X_train.shape[2]
-hidden_dim = 4  # Number of qubits
-output_dim = len(label_encoder_app.classes_)
+def train_model(model, X_train, y_train, optimizer, epochs):
+    for epoch in range(epochs):
+        for i in range(len(X_train)):
+            x, y = X_train[i], y_train[i]
+            y_pred = model.forward(x)
+            model.qLSTM.weights = optimizer.step(lambda w: loss(y, y_pred), model.qLSTM.weights)
 
-model = qLSTMModel(input_dim, hidden_dim, output_dim)
+        if epoch % 10 == 0:
+            train_loss = np.mean([loss(y_train[i], model.forward(X_train[i])) for i in range(len(X_train))])
+            print(f"Epoch {epoch}: Loss {train_loss}")
 
-# Define the loss function and optimizer
+# Define the loss function
 def loss(y_true, y_pred):
     return np.mean(np.square(y_true - y_pred))
 
-optimizer = AdamOptimizer(0.01)
-epochs = 150
-
-# Training loop
-for epoch in range(epochs):
-    for i in range(len(X_train)):
-        x, y = X_train[i], y_train[i]
-        y_pred = model.forward(x)
-        model.qLSTM.weights = optimizer.step(lambda w: loss(y, y_pred), model.qLSTM.weights)
-
-    if epoch % 10 == 0:
-        train_loss = np.mean([loss(y_train[i], model.forward(X_train[i])) for i in range(len(X_train))])
-        print(f"Epoch {epoch}: Loss {train_loss}")
-
-# Testing
 # Testing Phase
-total_dataset = encoded_data.values  # Use .values to convert DataFrame to ndarray
-inputs = total_dataset[len(total_dataset) - len(test_set) - 10:].reshape(-1, 1)
-inputs = scaler.transform(inputs)
-X_test = []
+def test_model(model, X_test, scaler, label_encoder):
+    inputs = scaler.transform(X_test)
+    X_test = []
+    for i in range(len(inputs)):
+        X_test.append(inputs[i:i+10, 0])
 
-for i in range(10, len(inputs)):
-    X_test.append(inputs[i-10:i, 0])
+    X_test = np.array(X_test).reshape(-1, 10, 1)
+    predicted_app = model.predict(X_test)
+    predicted_app = np.clip(predicted_app, 0, len(label_encoder.classes_) - 1)
 
-X_test = np.array(X_test)
-X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+    idx = (-predicted_app).argsort()
+    idx_clipped = np.clip(idx, 0, len(label_encoder.classes_) - 1)
+    prediction = label_encoder.inverse_transform(idx_clipped.flatten())
 
-predicted_app = model.predict(X_test)
+    actual_app_used = label_encoder.inverse_transform(test_set['Encoded_App'].values)
 
-# Clip predicted labels to the valid range
-predicted_app = np.clip(predicted_app, 0, len(label_encoder_app.classes_) - 1)
+    final_outcome = pd.DataFrame({'Prediction': prediction, 'Actual App Used': actual_app_used})
+    return final_outcome
 
-# Final predictions
-idx = (-predicted_app).argsort()
-idx = pd.DataFrame(idx)
+# Main function
+def main():
+    # Load and clean the data
+    data = clean_data(data)
 
-# Clip indices to ensure they are within the range of seen labels
-idx_clipped = np.clip(idx, 0, len(label_encoder_app.classes_) - 1)
-prediction = label_encoder_app.inverse_transform(idx_clipped.values.flatten())
+    # Encode the data
+    encoded_data, label_encoder = encode_data(data)
 
-# Reshape prediction back to DataFrame format
-prediction = pd.DataFrame(data=prediction.reshape(-1, idx.shape[1]), columns=[f'Prediction{i+1}' for i in range(idx.shape[1])])
+    # Split into training and testing sets
+    train_set, test_set = split_into_train_test_set(encoded_data)
 
-actual_app_used = label_encoder_app.inverse_transform(test_set.values)
-actual_app_used = pd.DataFrame(data=actual_app_used, columns=['Actual App Used'])
+    # Scale the data
+    scaled_train_data, scaler = scale_data(train_set['Encoded_App'])
 
-final_outcome = pd.concat([prediction, actual_app_used], axis=1)
+    # Prepare training data
+    X_train, y_train = prepare_training_data(scaled_train_data, sequence_length=10)
 
-print('***********************************FINAL PREDICTION*********************************')
-print(final_outcome)
+    # Instantiate the model
+    input_dim = X_train.shape[1]
+    hidden_dim = 4  # Number of qubits
+    output_dim = len(label_encoder.classes_)
+    model = qLSTMModel(input_dim, hidden_dim, output_dim)
+
+    # Define the optimizer and train the model
+    optimizer = AdamOptimizer(0.01)
+    epochs = 150
+    train_model(model, X_train, y_train, optimizer, epochs)
+
+    # Prepare testing data and evaluate the model
+    X_test = test_set['Encoded_App'].values
+    final_results = test_model(model, X_test, scaler, label_encoder)
+
+    print('***********************************FINAL PREDICTION*********************************')
+    print(final_results)
+
+if __name__ == "__main__":
+    main()
